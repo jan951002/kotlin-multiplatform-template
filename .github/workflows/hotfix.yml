@@ -1,0 +1,170 @@
+name: Hotfix Automation
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main, develop]
+
+jobs:
+  create-backport:
+    name: Create Backport PR
+    runs-on: ubuntu-latest
+    if: |
+      github.event.pull_request.merged == true && 
+      startsWith(github.event.pull_request.head.ref, 'fix/')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+      - name: Create backport branch and PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the original fix branch name and PR info
+          fix_branch="${{ github.event.pull_request.head.ref }}"
+          fix_description="${{ github.event.pull_request.title }}"
+          pr_number="${{ github.event.pull_request.number }}"
+          pr_body="${{ github.event.pull_request.body }}"
+          
+          # Extract the fix description (remove fix/ prefix)
+          fix_name=${fix_branch#fix/}
+          backport_branch="backport/${fix_name}"
+          
+          echo "🔄 Creating backport for: $fix_branch"
+          echo "📝 Fix description: $fix_description"
+          echo "🌿 Backport branch: $backport_branch"
+          
+          # Ensure we're on the target branch (main or develop)
+          target_branch="${{ github.event.pull_request.base.ref }}"
+          git checkout $target_branch
+          git pull origin $target_branch
+          
+          # Create and checkout backport branch
+          git checkout -b $backport_branch
+          
+          # Get the merge commit SHA
+          merge_commit="${{ github.event.pull_request.merge_commit_sha }}"
+          
+          # Cherry-pick the merge commit
+          if git cherry-pick -m 1 $merge_commit; then
+            echo "✅ Cherry-pick successful"
+            
+            # Push the backport branch
+            git push origin $backport_branch
+            
+            # Create PR body for backport
+            backport_body="## 🔄 Automated Backport
+          
+          This is an automated backport of PR #${pr_number}: **${fix_description}**
+          
+          ### Original PR Details
+          - **Source Branch**: \`${fix_branch}\`
+          - **Target Branch**: \`master\`
+          - **Merge Commit**: \`${merge_commit}\`
+          
+          ### Original Description
+          ${pr_body}
+          
+          ---
+          *This backport was created automatically by the hotfix automation workflow.*"
+          
+            # Create the backport PR to master
+            gh pr create \
+              --title "🔄 Backport: ${fix_description}" \
+              --body "$backport_body" \
+              --base master \
+              --head $backport_branch \
+              --label "backport" \
+              --label "automated"
+            
+            echo "✅ Backport PR created successfully"
+            
+          else
+            echo "❌ Cherry-pick failed - manual intervention required"
+            
+            # Create an issue for manual backport
+            issue_body="## ⚠️ Manual Backport Required
+          
+          The automated backport for PR #${pr_number} failed due to conflicts.
+          
+          ### Details
+          - **Original PR**: #${pr_number} - ${fix_description}
+          - **Source Branch**: \`${fix_branch}\`
+          - **Target Branch**: \`master\`
+          - **Failed Branch**: \`${backport_branch}\`
+          - **Merge Commit**: \`${merge_commit}\`
+          
+          ### Manual Steps Required
+          1. \`git checkout master && git pull origin master\`
+          2. \`git checkout -b ${backport_branch}\`
+          3. \`git cherry-pick -m 1 ${merge_commit}\`
+          4. Resolve conflicts manually
+          5. \`git add . && git cherry-pick --continue\`
+          6. \`git push origin ${backport_branch}\`
+          7. Create PR manually from \`${backport_branch}\` to \`master\`
+          
+          ### Original PR Body
+          ${pr_body}"
+          
+            gh issue create \
+              --title "🚨 Manual Backport Required: ${fix_description}" \
+              --body "$issue_body" \
+              --label "backport" \
+              --label "manual-intervention" \
+              --label "urgent"
+            
+            # Clean up failed branch
+            git checkout $target_branch
+            git branch -D $backport_branch
+            
+            echo "🚨 Manual backport issue created"
+            exit 1
+          fi
+
+  auto-patch-version:
+    name: Create Patch Version Tag
+    runs-on: ubuntu-latest
+    needs: create-backport
+    if: |
+      needs.create-backport.result == 'success' && 
+      github.event.pull_request.base.ref == 'main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create patch version tag
+        run: |
+          # Get the latest tag
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $latest_tag"
+          
+          # Extract version numbers (remove 'v' prefix if present)
+          version=${latest_tag#v}
+          
+          # Split version into parts
+          IFS='.' read -ra VERSION_PARTS <<< "$version"
+          major=${VERSION_PARTS[0]:-0}
+          minor=${VERSION_PARTS[1]:-0}
+          patch=${VERSION_PARTS[2]:-0}
+          
+          # Increment patch version
+          new_patch=$((patch + 1))
+          new_version="v${major}.${minor}.${new_patch}"
+          
+          echo "New version: $new_version"
+          
+          # Create and push tag
+          git tag -a $new_version -m "Hotfix release $new_version - ${{ github.event.pull_request.title }}"
+          git push origin $new_version
+          
+          echo "✅ Created patch version tag: $new_version"
