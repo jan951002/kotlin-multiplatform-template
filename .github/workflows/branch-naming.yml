@@ -81,11 +81,27 @@ jobs:
           # Array of valid commit prefixes (conventional commits)
           valid_prefixes=("feat:" "fix:" "docs:" "style:" "refactor:" "test:" "chore:" "ci:" "build:" "perf:")
           
-          invalid_commits=()
+          # Get all commits in the PR
+          commits=($(git rev-list --reverse "$base_sha..$head_sha"))
+          total_commits=${#commits[@]}
           
-          for commit in $(git rev-list --reverse "$base_sha..$head_sha"); do
+          echo "📊 Found $total_commits commits in this PR"
+          
+          # Strategy: Validate the last commit strictly, be more lenient with intermediate commits
+          invalid_commits=()
+          intermediate_warnings=()
+          
+          for i in "${!commits[@]}"; do
+            commit=${commits[$i]}
             message=$(git log --format=%s -n 1 $commit)
-            echo "Checking: $message"
+            is_last_commit=false
+            
+            if [[ $i -eq $((total_commits - 1)) ]]; then
+              is_last_commit=true
+              echo "🎯 Checking FINAL commit: $message"
+            else
+              echo "🔍 Checking intermediate commit: $message"
+            fi
             
             # Check if commit message starts with valid prefix
             valid=false
@@ -102,21 +118,51 @@ jobs:
                  [[ $message =~ ^Initial\ commit$ ]] || \
                  [[ $message =~ ^Revert ]] ; then
                 valid=true
+              # For intermediate commits, allow common development patterns
+              elif [[ $is_last_commit == false ]]; then
+                if [[ $message =~ ^(WIP|wip|Update|update|Add|add|Fix|fix|Remove|remove|Refactor|refactor) ]] || \
+                   [[ $message =~ ^(Improve|improve|Clean|clean|Adjust|adjust|Modify|modify) ]] || \
+                   [[ $message =~ ^[A-Z][a-z].*[a-z]$ ]]; then
+                  valid=true
+                  intermediate_warnings+=("$message")
+                  echo "⚠️  Intermediate commit uses informal format (allowed): $message"
+                fi
               fi
             fi
             
             if [[ $valid == false ]]; then
-              invalid_commits+=("$message")
+              if [[ $is_last_commit == true ]]; then
+                invalid_commits+=("$message (FINAL COMMIT - MUST BE VALID)")
+              else
+                invalid_commits+=("$message")
+              fi
             fi
           done
           
+          # Show warnings for intermediate commits
+          if [[ ${#intermediate_warnings[@]} -gt 0 ]]; then
+            echo ""
+            echo "⚠️  Found informal intermediate commits (allowed during development):"
+            for msg in "${intermediate_warnings[@]}"; do
+              echo "  • $msg"
+            done
+            echo ""
+            echo "💡 Consider squashing commits or using conventional format for cleaner history"
+          fi
+          
+          # Only fail if there are truly invalid commits
           if [[ ${#invalid_commits[@]} -gt 0 ]]; then
+            echo ""
             echo "❌ Found invalid commit messages:"
             for msg in "${invalid_commits[@]}"; do
               echo "  • $msg"
             done
             echo ""
-            echo "Commit messages should follow conventional commit format:"
+            echo "📝 Commit message requirements:"
+            echo "  • FINAL commit MUST follow conventional commit format"
+            echo "  • Intermediate commits can use informal format during development"
+            echo ""
+            echo "✅ Valid conventional commit examples:"
             echo "  • feat: add new user authentication"
             echo "  • fix: resolve crash on app startup"
             echo "  • docs: update README with setup instructions"
@@ -124,10 +170,12 @@ jobs:
             echo "  • test: add unit tests for login flow"
             echo ""
             echo "Valid prefixes: ${valid_prefixes[*]}"
+            echo ""
+            echo "💡 Tip: Use 'git rebase -i' to clean up commit history before merging"
             exit 1
           fi
           
-          echo "✅ All commit messages follow conventional commit format"
+          echo "✅ Commit message validation passed!"
 
   check-pr-size:
     name: Check PR Size
