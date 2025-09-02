@@ -1,0 +1,241 @@
+name: Branch Naming Convention
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-branch-name:
+    name: Validate Branch Name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch naming convention
+        run: |
+          branch="${{ github.head_ref }}"
+          echo "🔍 Checking branch name: $branch"
+          
+          # Define allowed prefixes
+          allowed_prefixes=("feature/" "fix/" "backport/" "release/")
+          
+          # Check if branch starts with allowed prefix
+          valid=false
+          for prefix in "${allowed_prefixes[@]}"; do
+            if [[ $branch == $prefix* ]]; then
+              valid=true
+              echo "✅ Branch name '$branch' follows convention with prefix '$prefix'"
+              break
+            fi
+          done
+          
+          if [[ $valid == false ]]; then
+            echo "❌ Invalid branch name: '$branch'"
+            echo ""
+            echo "Branch names must start with one of the following prefixes:"
+            echo "  • feature/  - for new features"
+            echo "  • fix/      - for bug fixes and hotfixes"  
+            echo "  • backport/ - for automated backport changes"
+            echo "  • release/  - for release preparation (format: release/x.y.z)"
+            echo ""
+            echo "Examples:"
+            echo "  ✅ feature/user-authentication"
+            echo "  ✅ fix/crash-on-startup"
+            echo "  ✅ backport/critical-security-fix"
+            echo "  ✅ release/1.2.0"
+            echo ""
+            exit 1
+          fi
+
+      - name: Validate release branch format
+        if: startsWith(github.head_ref, 'release/')
+        run: |
+          branch="${{ github.head_ref }}"
+          version_part=${branch#release/}
+          
+          # Check if version follows semantic versioning (x.y.z)
+          if [[ ! $version_part =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Release branch must follow format: release/x.y.z"
+            echo "   Example: release/1.0.0"
+            echo "   Your branch: $branch"
+            exit 1
+          fi
+          
+          echo "✅ Release branch version format is valid: $version_part"
+
+  check-commit-messages:
+    name: Validate Commit Messages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate commit messages
+        run: |
+          echo "🔍 Checking commit messages..."
+          
+          # Get commits in this PR
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+          
+          # Array of valid commit prefixes (conventional commits)
+          valid_prefixes=("feat:" "fix:" "docs:" "style:" "refactor:" "test:" "chore:" "ci:" "build:" "perf:")
+          
+          # Get all commits in the PR
+          commits=($(git rev-list --reverse "$base_sha..$head_sha"))
+          total_commits=${#commits[@]}
+          
+          echo "📊 Found $total_commits commits in this PR"
+          
+          # Strategy: Validate the last commit strictly, be more lenient with intermediate commits
+          invalid_commits=()
+          intermediate_warnings=()
+          
+          for i in "${!commits[@]}"; do
+            commit=${commits[$i]}
+            message=$(git log --format=%s -n 1 $commit)
+            is_last_commit=false
+            
+            if [[ $i -eq $((total_commits - 1)) ]]; then
+              is_last_commit=true
+              echo "🎯 Checking FINAL commit: $message"
+            else
+              echo "🔍 Checking intermediate commit: $message"
+            fi
+            
+            # Check if commit message starts with valid prefix
+            valid=false
+            for prefix in "${valid_prefixes[@]}"; do
+              if [[ $message == $prefix* ]]; then
+                valid=true
+                break
+              fi
+            done
+            
+            if [[ $valid == false ]]; then
+              # Allow merge commits and some common patterns
+              if [[ $message =~ ^Merge\ (branch|pull\ request) ]] || \
+                 [[ $message =~ ^Initial\ commit$ ]] || \
+                 [[ $message =~ ^Revert ]] ; then
+                valid=true
+              # For intermediate commits, allow common development patterns
+              elif [[ $is_last_commit == false ]]; then
+                if [[ $message =~ ^(WIP|wip|Update|update|Add|add|Fix|fix|Remove|remove|Refactor|refactor) ]] || \
+                   [[ $message =~ ^(Improve|improve|Clean|clean|Adjust|adjust|Modify|modify) ]] || \
+                   [[ $message =~ ^[A-Z][a-z].*[a-z]$ ]]; then
+                  valid=true
+                  intermediate_warnings+=("$message")
+                  echo "⚠️  Intermediate commit uses informal format (allowed): $message"
+                fi
+              fi
+            fi
+            
+            if [[ $valid == false ]]; then
+              if [[ $is_last_commit == true ]]; then
+                invalid_commits+=("$message (FINAL COMMIT - MUST BE VALID)")
+              else
+                invalid_commits+=("$message")
+              fi
+            fi
+          done
+          
+          # Show warnings for intermediate commits
+          if [[ ${#intermediate_warnings[@]} -gt 0 ]]; then
+            echo ""
+            echo "⚠️  Found informal intermediate commits (allowed during development):"
+            for msg in "${intermediate_warnings[@]}"; do
+              echo "  • $msg"
+            done
+            echo ""
+            echo "💡 Consider squashing commits or using conventional format for cleaner history"
+          fi
+          
+          # Only fail if there are truly invalid commits
+          if [[ ${#invalid_commits[@]} -gt 0 ]]; then
+            echo ""
+            echo "❌ Found invalid commit messages:"
+            for msg in "${invalid_commits[@]}"; do
+              echo "  • $msg"
+            done
+            echo ""
+            echo "📝 Commit message requirements:"
+            echo "  • FINAL commit MUST follow conventional commit format"
+            echo "  • Intermediate commits can use informal format during development"
+            echo ""
+            echo "✅ Valid conventional commit examples:"
+            echo "  • feat: add new user authentication"
+            echo "  • fix: resolve crash on app startup"
+            echo "  • docs: update README with setup instructions"
+            echo "  • refactor: simplify user repository logic"
+            echo "  • test: add unit tests for login flow"
+            echo ""
+            echo "Valid prefixes: ${valid_prefixes[*]}"
+            echo ""
+            echo "💡 Tip: Use 'git rebase -i' to clean up commit history before merging"
+            exit 1
+          fi
+          
+          echo "✅ Commit message validation passed!"
+
+  check-pr-size:
+    name: Check PR Size
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR size
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            const additions = pr.data.additions;
+            const deletions = pr.data.deletions;
+            const changes = additions + deletions;
+            
+            console.log(`📊 PR Stats:`);
+            console.log(`  • Lines added: ${additions}`);
+            console.log(`  • Lines deleted: ${deletions}`);
+            console.log(`  • Total changes: ${changes}`);
+            
+            // Define size thresholds
+            let size = 'XS';
+            let emoji = '🟢';
+            
+            if (changes > 1000) {
+              size = 'XL';
+              emoji = '🔴';
+            } else if (changes > 500) {
+              size = 'L';
+              emoji = '🟠';
+            } else if (changes > 100) {
+              size = 'M';
+              emoji = '🟡';
+            } else if (changes > 30) {
+              size = 'S';
+              emoji = '🟢';
+            }
+            
+            console.log(`${emoji} PR Size: ${size}`);
+            
+            // Add label based on size
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: [`size/${size}`]
+            });
+            
+            // Warn for very large PRs
+            if (changes > 800) {
+              console.log('⚠️  Large PR detected! Consider breaking it into smaller PRs for easier review.');
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `⚠️ **Large PR Warning**\n\nThis PR has **${changes} changes** (${additions} additions, ${deletions} deletions).\n\nConsider breaking large PRs into smaller, focused changes for:\n- Easier code review\n- Reduced merge conflicts\n- Faster feedback cycles\n- Better change tracking`
+              });
+            }

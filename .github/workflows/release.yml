@@ -1,0 +1,261 @@
+name: Release Pipeline
+
+on:
+  push:
+    branches:
+      - 'release/**'
+  pull_request:
+    branches:
+      - 'main'
+    types: [closed]
+
+jobs:
+  validate-release:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/heads/release/') || (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/'))
+    outputs:
+      version: ${{ steps.extract-version.outputs.version }}
+      is-release-merge: ${{ steps.check-merge.outputs.is-release-merge }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if this is a release merge
+        id: check-merge
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.merged }}" == "true" ]]; then
+            echo "is-release-merge=true" >> $GITHUB_OUTPUT
+          else
+            echo "is-release-merge=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract version from branch
+        id: extract-version
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            branch="${{ github.event.pull_request.head.ref }}"
+          else
+            branch="${{ github.ref_name }}"
+          fi
+          
+          version=${branch#release/}
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "Extracted version: $version"
+          
+          # Validate version format (semantic versioning)
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Invalid version format: $version"
+            echo "Expected format: x.y.z (e.g., 1.0.0)"
+            exit 1
+          fi
+
+      - name: Check version consistency
+        run: |
+          version="${{ steps.extract-version.outputs.version }}"
+          
+          # Check if version exists in version.properties or build.gradle
+          if [ -f "version.properties" ]; then
+            file_version=$(grep "version=" version.properties | cut -d'=' -f2)
+            if [[ "$file_version" != "$version" ]]; then
+              echo "❌ Version mismatch: branch has $version, version.properties has $file_version"
+              exit 1
+            fi
+          fi
+          
+          # Check for existing tag
+          if git tag --list | grep -q "^v$version$"; then
+            echo "❌ Version tag v$version already exists"
+            exit 1
+          fi
+          
+          echo "✅ Version validation passed: $version"
+
+      - name: Validate changelog
+        run: |
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "❌ CHANGELOG.md not found"
+            exit 1
+          fi
+          
+          version="${{ steps.extract-version.outputs.version }}"
+          
+          # Check if version exists in changelog
+          if ! grep -q "\[${version}\]" CHANGELOG.md; then
+            echo "❌ Version [$version] not found in CHANGELOG.md"
+            echo "Please add release notes for version $version"
+            exit 1
+          fi
+          
+          echo "✅ Changelog validation passed"
+
+  full-test-suite:
+    name: Full Test Suite
+    runs-on: ${{ matrix.os }}
+    needs: validate-release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Run all tests
+        run: ./gradlew check
+
+      - name: Build all platforms
+        run: |
+          ./gradlew :androidApp:assembleRelease
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            ./gradlew :shared:assembleXCFramework
+          fi
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    needs: validate-release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Run security scan
+        run: ./gradlew dependencyCheckAnalyze
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-report
+          path: '**/build/reports/dependency-check-report.html'
+
+  build-release-artifacts:
+    name: Build Release Artifacts
+    runs-on: ${{ matrix.os }}
+    needs: [validate-release, full-test-suite, security-audit]
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: android
+          - os: macos-latest
+            platform: ios
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build Android Release
+        if: matrix.platform == 'android'
+        run: |
+          ./gradlew :androidApp:assembleRelease
+          ./gradlew :androidApp:bundleRelease
+
+      - name: Build iOS Framework
+        if: matrix.platform == 'ios'
+        run: ./gradlew :shared:assembleXCFramework
+
+      - name: Upload Android artifacts
+        if: matrix.platform == 'android'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-artifacts
+          path: |
+            androidApp/build/outputs/apk/release/*.apk
+            androidApp/build/outputs/bundle/release/*.aab
+
+      - name: Upload iOS artifacts
+        if: matrix.platform == 'ios'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-release-artifacts
+          path: shared/build/XCFrameworks/
+
+  create-github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate-release, build-release-artifacts]
+    if: needs.validate-release.outputs.is-release-merge == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate release notes
+        id: release-notes
+        run: |
+          version="${{ needs.validate-release.outputs.version }}"
+          
+          # Extract release notes from CHANGELOG.md
+          awk "/\[${version}\]/,/\[.*\]/{if(/\[${version}\]/) p=1; else if(/\[.*\]/ && p) exit; if(p && !/\[${version}\]/) print}" CHANGELOG.md > release_notes.txt
+          
+          # Remove empty lines and format
+          sed -i '/^$/d' release_notes.txt
+          
+          echo "Generated release notes:"
+          cat release_notes.txt
+
+      - name: Create Git tag
+        run: |
+          version="${{ needs.validate-release.outputs.version }}"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          git tag -a "v${version}" -m "Release version ${version}"
+          git push origin "v${version}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ needs.validate-release.outputs.version }}"
+          
+          # Create release with artifacts
+          gh release create "v${version}" \
+            --title "Release v${version}" \
+            --notes-file release_notes.txt \
+            --draft=false \
+            --prerelease=false \
+            android-release-artifacts/* \
+            ios-release-artifacts/*

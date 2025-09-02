@@ -1,0 +1,182 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  # General hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      # Git hooks
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+        description: Trims trailing whitespace
+        entry: trailing-whitespace-fixer
+        language: python
+        types: [text]
+      
+      - id: end-of-file-fixer
+        name: Fix end of files
+        description: Makes sure files end with exactly one newline
+        entry: end-of-file-fixer
+        language: python
+        types: [text]
+      
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+        description: Check for files that contain merge conflict strings
+        entry: check-merge-conflict
+        language: python
+        
+      - id: check-case-conflict
+        name: Check for case conflicts
+        description: Check for files with names that would conflict on case-insensitive filesystems
+        entry: check-case-conflict
+        language: python
+      
+      - id: check-added-large-files
+        name: Check for large files
+        description: Prevent giant files from being committed
+        entry: check-added-large-files
+        language: python
+        args: ['--maxkb=1024']  # 1MB limit
+      
+      # JSON/YAML validation
+      - id: check-json
+        name: Check JSON syntax
+        description: Attempts to load all json files to verify syntax
+        entry: check-json
+        language: python
+        types: [json]
+      
+      - id: check-yaml
+        name: Check YAML syntax
+        description: Attempts to load all yaml files to verify syntax
+        entry: check-yaml
+        language: python
+        types: [yaml]
+        args: ['--allow-multiple-documents']
+      
+      - id: pretty-format-json
+        name: Pretty format JSON
+        description: Checks or prettifies JSON files
+        entry: pretty-format-json
+        language: python
+        types: [json]
+        args: ['--autofix']
+
+  # Kotlin/Android specific hooks
+  - repo: local
+    hooks:
+      # Gradle wrapper validation
+      - id: gradle-wrapper-validation
+        name: Validate Gradle wrapper
+        description: Validates the gradle wrapper files
+        entry: gradle/wrapper/gradle-wrapper.jar
+        language: system
+        pass_filenames: false
+        always_run: true
+        files: gradle/wrapper/gradle-wrapper\.(jar|properties)$
+        
+      # Ktlint formatting
+      - id: ktlint-format
+        name: Format Kotlin files
+        description: Format Kotlin files with ktlint
+        entry: ./gradlew ktlintFormat
+        language: system
+        types: [kotlin]
+        pass_filenames: false
+        
+      # Ktlint check
+      - id: ktlint-check
+        name: Check Kotlin style
+        description: Check Kotlin code style with ktlint
+        entry: ./gradlew ktlintCheck
+        language: system
+        types: [kotlin]
+        pass_filenames: false
+        
+      # Detekt static analysis
+      - id: detekt
+        name: Run Detekt
+        description: Run Detekt static analysis
+        entry: ./gradlew detekt
+        language: system
+        types: [kotlin]
+        pass_filenames: false
+        
+      # Unit tests
+      - id: run-tests
+        name: Run unit tests
+        description: Run unit tests before commit
+        entry: ./gradlew :shared:testDebugUnitTest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]  # Only run on push, not every commit
+        
+      # Check for TODOs/FIXMEs in production code
+      - id: no-todo-fixme
+        name: Check for TODO/FIXME
+        description: Check for TODO and FIXME comments in production code
+        entry: bash -c 'if grep -r --include="*.kt" --exclude-dir=test "TODO\|FIXME" shared/src/commonMain shared/src/androidMain shared/src/iosMain androidApp/src/main; then echo "Found TODO/FIXME comments in production code. Please resolve or document them."; exit 1; fi'
+        language: system
+        pass_filenames: false
+        
+      # Check for debugging code
+      - id: no-debug-code
+        name: Check for debug code
+        description: Check for debugging statements that should not be committed
+        entry: bash -c 'if grep -r --include="*.kt" "println\|console\.log\|System\.out" shared/src androidApp/src; then echo "Found debugging statements. Please remove before committing."; exit 1; fi'
+        language: system
+        pass_filenames: false
+        
+      # Android specific checks
+      - id: check-android-permissions
+        name: Check Android permissions
+        description: Alert when new Android permissions are added
+        entry: bash -c 'git diff --cached --name-only | grep -q "AndroidManifest.xml" && git diff --cached | grep -q "uses-permission" && echo "⚠️  Android permissions modified. Please review security implications." || true'
+        language: system
+        pass_filenames: false
+        
+      # Check for hardcoded strings in Android
+      - id: no-hardcoded-strings
+        name: Check for hardcoded strings
+        description: Check for hardcoded strings in Android layouts and code
+        entry: bash -c 'if find androidApp/src/main -name "*.xml" -o -name "*.kt" | xargs grep -l "android:text=\"[^@]" 2>/dev/null; then echo "Found hardcoded strings. Please use string resources."; exit 1; fi'
+        language: system
+        pass_filenames: false
+        
+      # Validate commit message format
+      - id: commit-msg-format
+        name: Validate commit message
+        description: Ensure commit messages follow conventional commit format
+        entry: bash -c 'if ! grep -qE "^(feat|fix|docs|style|refactor|test|chore|ci|build|perf)(\(.+\))?: .{1,50}" "$1"; then echo "Commit message must follow conventional commit format: type(scope): description"; exit 1; fi'
+        language: system
+        stages: [commit-msg]
+        pass_filenames: false
+
+  # Additional security checks
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        name: Detect secrets
+        description: Detect secrets in committed files
+        args: ['--baseline', '.secrets.baseline']
+        exclude: package.lock.json
+
+# Configuration
+default_stages: [pre-commit]
+fail_fast: false
+minimum_pre_commit_version: '3.0.0'
+
+# CI configuration
+ci:
+  autofix_commit_msg: |
+    [pre-commit.ci] auto fixes from pre-commit hooks
+    
+    for more information, see https://pre-commit.ci
+  autofix_prs: true
+  autoupdate_branch: ''
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
+  autoupdate_schedule: weekly
+  skip: []
+  submodules: false
