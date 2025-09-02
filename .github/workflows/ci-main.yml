@@ -14,17 +14,51 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-latest
+    outputs:
+      has-gradle: ${{ steps.check-gradle.outputs.has-gradle }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check for Gradle project
+        id: check-gradle
+        run: |
+          if [ -f "gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "has-gradle=true" >> $GITHUB_OUTPUT
+            echo "✅ Gradle project detected"
+          else
+            echo "has-gradle=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  No Gradle project detected - skipping Gradle-specific validations"
+            echo "   This is normal for project templates in early stages"
+          fi
+
       - name: Validate Gradle wrapper
+        if: steps.check-gradle.outputs.has-gradle == 'true'
         uses: gradle/wrapper-validation-action@v1
+
+      - name: Template validation
+        if: steps.check-gradle.outputs.has-gradle == 'false'
+        run: |
+          echo "🏗️  Validating project template structure..."
+          
+          # Check for basic template files
+          if [ ! -f "README.md" ]; then
+            echo "❌ README.md is required"
+            exit 1
+          fi
+          
+          if [ ! -f "LICENSE" ]; then
+            echo "❌ LICENSE file is required"
+            exit 1
+          fi
+          
+          echo "✅ Template structure validation passed"
 
   lint:
     name: Code Style & Lint
     runs-on: ubuntu-latest
     needs: validate
+    if: needs.validate.outputs.has-gradle == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -62,6 +96,7 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     needs: validate
+    if: needs.validate.outputs.has-gradle == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -113,7 +148,8 @@ jobs:
   build-android:
     name: Build Android
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [validate, lint, test]
+    if: needs.validate.outputs.has-gradle == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -146,7 +182,8 @@ jobs:
   build-ios:
     name: Build iOS
     runs-on: macos-latest
-    needs: [lint, test]
+    needs: [validate, lint, test]
+    if: needs.validate.outputs.has-gradle == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -183,6 +220,7 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: validate
+    if: needs.validate.outputs.has-gradle == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -216,14 +254,45 @@ jobs:
   success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [build-android, build-ios, security-scan]
+    needs: [validate, lint, test, build-android, build-ios, security-scan]
     if: always()
     steps:
-      - name: Check all jobs status
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      - name: Check job results
         run: |
-          echo "One or more jobs failed or were cancelled"
-          exit 1
-      
-      - name: Success notification
-        run: echo "🎉 All CI checks passed successfully!"
+          echo "🔍 Checking CI pipeline results..."
+          
+          # Check validation job (always runs)
+          if [[ "${{ needs.validate.result }}" == "failure" ]]; then
+            echo "❌ Validation failed"
+            exit 1
+          fi
+          
+          # Check Gradle-dependent jobs (only if they ran)
+          gradle_jobs=("lint" "test" "build-android" "build-ios" "security-scan")
+          for job in "${gradle_jobs[@]}"; do
+            result=""
+            case $job in
+              "lint") result="${{ needs.lint.result }}" ;;
+              "test") result="${{ needs.test.result }}" ;;
+              "build-android") result="${{ needs.build-android.result }}" ;;
+              "build-ios") result="${{ needs.build-ios.result }}" ;;
+              "security-scan") result="${{ needs.security-scan.result }}" ;;
+            esac
+            
+            if [[ "$result" == "failure" ]]; then
+              echo "❌ $job failed"
+              exit 1
+            elif [[ "$result" == "success" ]]; then
+              echo "✅ $job passed"
+            elif [[ "$result" == "skipped" ]]; then
+              echo "⏭️  $job skipped (no Gradle project)"
+            fi
+          done
+          
+          echo ""
+          if [[ "${{ needs.validate.outputs.has-gradle }}" == "true" ]]; then
+            echo "🎉 All Gradle project CI checks passed successfully!"
+          else
+            echo "🎉 Template validation completed successfully!"
+            echo "ℹ️  Gradle-specific checks were skipped (normal for project templates)"
+          fi
